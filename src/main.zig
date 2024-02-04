@@ -36,22 +36,20 @@ pub fn clear() !void {
     try stdout.print("\x1b[H", .{});
 }
 
-pub fn print_files(files: std.ArrayList([]const u8), mode: Hidden, icon: []const u8) !void {
+pub fn print_files(files: std.ArrayList([]const u8), mode: Hidden) !void {
     switch (mode) {
         .on => {
             for (files.items) |item| {
-                try stdout.print("{s} {s}\n", .{ icon, item });
+                try stdout.print("{s}\n", .{item});
             }
         },
         .off => {
             for (files.items) |item| {
-                if (item[0] != '.')
-                    std.debug.print("{s} {s}\n", .{ icon, item });
+                std.debug.print("{s}\n", .{item});
             }
         },
     }
 }
-
 pub fn main() !void {
     var bw = std.io.bufferedWriter(stdout);
     const stdin = std.io.getStdIn();
@@ -63,32 +61,40 @@ pub fn main() !void {
     defer _ = gpa.deinit();
 
     var dirs = std.ArrayList([]const u8).init(gpa.allocator());
-    defer dirs.deinit();
+    defer {
+        for (dirs.items) |f| gpa.allocator().free(f);
+        dirs.deinit();
+    }
     var files = std.ArrayList([]const u8).init(gpa.allocator());
-    defer files.deinit();
-
+    defer {
+        for (files.items) |f| gpa.allocator().free(f);
+        files.deinit();
+    }
     //var term = Term{ .og_termios = undefined };
     //try term.enable_raw();
     //defer term.disable_raw() catch {};
 
     var dir = try std.fs.cwd().openDir(arg_path, .{ .iterate = true });
     defer dir.close();
-    var iter = dir.iterate();
-
+    var iter = dir.iterateAssumeFirstIteration();
     try clear();
     while (try iter.next()) |file| {
         switch (file.kind) {
             .file => {
-                try files.append(file.name);
+                const cmd = try std.fmt.allocPrint(gpa.allocator(), "{s} {s}", .{ FileIcon, file.name });
+                errdefer gpa.allocator().free(cmd);
+                try files.append(cmd);
             },
             .directory => {
-                try dirs.append(file.name);
+                const cmd = try std.fmt.allocPrint(gpa.allocator(), "{s} {s}", .{ DirIcon, file.name });
+                errdefer gpa.allocator().free(cmd);
+                try dirs.append(cmd);
             },
             else => continue,
         }
     }
-    try print_files(dirs, .on, DirIcon);
-    try print_files(files, .on, FileIcon);
+    try print_files(dirs, .on);
+    try print_files(files, .on);
     //try stdout.print("\n", .{});
     try bw.flush(); // don't forget to flush!
 }
