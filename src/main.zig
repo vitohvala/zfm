@@ -1,5 +1,13 @@
 const std = @import("std");
 const system = std.os.system;
+const stdout = std.io.getStdOut().writer();
+const FileIcon = "";
+const DirIcon = "";
+
+const Hidden = enum {
+    off,
+    on,
+};
 
 pub const Term = struct {
     handle: system.fd_t = std.io.getStdIn().handle,
@@ -23,27 +31,64 @@ pub const Term = struct {
         try std.os.tcsetattr(self.handle, .FLUSH, self.og_termios);
     }
 };
+pub fn clear() !void {
+    try stdout.print("\x1b[2J", .{});
+    try stdout.print("\x1b[H", .{});
+}
+
+pub fn print_files(files: std.ArrayList([]const u8), mode: Hidden, icon: []const u8) !void {
+    switch (mode) {
+        .on => {
+            for (files.items) |item| {
+                try stdout.print("{s} {s}\n", .{ icon, item });
+            }
+        },
+        .off => {
+            for (files.items) |item| {
+                if (item[0] != '.')
+                    std.debug.print("{s} {s}\n", .{ icon, item });
+            }
+        },
+    }
+}
 
 pub fn main() !void {
-    const stdout_file = std.io.getStdOut().writer();
+    var bw = std.io.bufferedWriter(stdout);
     const stdin = std.io.getStdIn();
     _ = stdin;
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
 
     const arg_path: []const u8 = if (std.os.argv.len > 1) std.mem.span(@as([*:0]const u8, std.os.argv.ptr[1])) else ".";
 
-    var term = Term{ .og_termios = undefined };
-    try term.enable_raw();
-    defer term.disable_raw() catch {};
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    var dirs = std.ArrayList([]const u8).init(gpa.allocator());
+    defer dirs.deinit();
+    var files = std.ArrayList([]const u8).init(gpa.allocator());
+    defer files.deinit();
+
+    //var term = Term{ .og_termios = undefined };
+    //try term.enable_raw();
+    //defer term.disable_raw() catch {};
 
     var dir = try std.fs.cwd().openDir(arg_path, .{ .iterate = true });
     defer dir.close();
     var iter = dir.iterate();
 
-    while (try iter.next()) |entry| {
-        std.debug.print(" {s} ", .{entry.name});
+    try clear();
+    while (try iter.next()) |file| {
+        switch (file.kind) {
+            .file => {
+                try files.append(file.name);
+            },
+            .directory => {
+                try dirs.append(file.name);
+            },
+            else => continue,
+        }
     }
-    try stdout.print("\n", .{});
+    try print_files(dirs, .on, DirIcon);
+    try print_files(files, .on, FileIcon);
+    //try stdout.print("\n", .{});
     try bw.flush(); // don't forget to flush!
 }
