@@ -9,9 +9,18 @@ const Hidden = enum {
     on,
 };
 
+const Key = enum {
+    UP,
+    DOWN,
+    RIGHT,
+    LEFT,
+    NOT_IMPLEMENTED,
+};
+
 pub const Term = struct {
     handle: system.fd_t = std.io.getStdIn().handle,
     og_termios: std.os.termios,
+    stdout: @TypeOf(std.io.getStdOut().writer()) = std.io.getStdOut().writer(),
 
     const Self = @This();
 
@@ -30,71 +39,116 @@ pub const Term = struct {
     pub fn disable_raw(self: *Self) !void {
         try std.os.tcsetattr(self.handle, .FLUSH, self.og_termios);
     }
+    pub fn clear(self: *Self) !void {
+        try self.stdout.print("\x1b[2J", .{});
+        try self.stdout.print("\x1b[H", .{});
+    }
+    pub fn print_files(self: *Self, files: std.ArrayList([]const u8), mode: Hidden) !void {
+        switch (mode) {
+            .on => {
+                for (files.items) |item| {
+                    try self.stdout.print("{s}\n", .{item});
+                }
+            },
+            .off => {
+                for (files.items) |item| {
+                    if (item[0] == '.')
+                        try self.stdout.print("{s}\n", .{item});
+                }
+            },
+        }
+    }
 };
-pub fn clear() !void {
-    try stdout.print("\x1b[2J", .{});
-    try stdout.print("\x1b[H", .{});
-}
 
-pub fn print_files(files: std.ArrayList([]const u8), mode: Hidden) !void {
-    switch (mode) {
-        .on => {
-            for (files.items) |item| {
-                try stdout.print("{s}\n", .{item});
+pub const Zfm = struct {
+    allocator: std.mem.Allocator,
+    files: std.ArrayList([]const u8) = undefined,
+    directories: std.ArrayList([]const u8) = undefined,
+    path: []const u8,
+
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator, path: []const u8) !Zfm {
+        return Zfm{
+            .allocator = allocator,
+            .directories = std.ArrayList([]const u8).init(allocator),
+            .files = std.ArrayList([]const u8).init(allocator),
+            .path = path,
+        };
+    }
+
+    pub fn deinit_items(self: *Self, alist: *std.ArrayList([]const u8)) void {
+        for (alist.items) |f|
+            self.allocator.free(f);
+        alist.deinit();
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.deinit_items(&self.directories);
+        self.deinit_items(&self.files);
+    }
+
+    pub fn ff_helper(self: *Self, file: *std.ArrayList([]const u8), icon: []const u8, name: []const u8) !void {
+        const cmd = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ icon, name });
+        errdefer self.allocator.free(cmd);
+        try file.append(cmd);
+    }
+
+    pub fn populate(self: *Self) !void {
+        var dir = try std.fs.cwd().openDir(self.path, .{ .iterate = true });
+        defer dir.close();
+        var iter = dir.iterate();
+        while (try iter.next()) |file| {
+            switch (file.kind) {
+                .file => {
+                    try self.ff_helper(&self.files, FileIcon, file.name);
+                },
+                .directory => {
+                    try self.ff_helper(&self.directories, DirIcon, file.name);
+                },
+                else => continue,
             }
-        },
-        .off => {
-            for (files.items) |item| {
-                std.debug.print("{s}\n", .{item});
-            }
-        },
+        }
+    }
+};
+
+pub fn key_pressed() !Key {
+    const stdin = std.io.getStdIn().reader();
+    var buf: [4]u8 = undefined;
+    const nread = try stdin.read(&buf);
+    std.debug.assert(nread >= 0);
+
+    if (nread > 2 and buf[0] == '\x1b' and buf[1] == '[') {
+        switch (buf[2]) {
+            'A' => return .UP,
+            'B' => return .DOWN,
+            'C' => return .RIGHT,
+            'D' => return .LEFT,
+            else => return .NOT_IMPLEMENTED,
+        }
     }
 }
+
 pub fn main() !void {
     var bw = std.io.bufferedWriter(stdout);
-    const stdin = std.io.getStdIn();
-    _ = stdin;
 
     const arg_path: []const u8 = if (std.os.argv.len > 1) std.mem.span(@as([*:0]const u8, std.os.argv.ptr[1])) else ".";
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    var dirs = std.ArrayList([]const u8).init(gpa.allocator());
-    defer {
-        for (dirs.items) |f| gpa.allocator().free(f);
-        dirs.deinit();
-    }
-    var files = std.ArrayList([]const u8).init(gpa.allocator());
-    defer {
-        for (files.items) |f| gpa.allocator().free(f);
-        files.deinit();
-    }
-    //var term = Term{ .og_termios = undefined };
-    //try term.enable_raw();
-    //defer term.disable_raw() catch {};
+    var zfm = try Zfm.init(gpa.allocator(), arg_path);
+    defer zfm.deinit();
 
-    var dir = try std.fs.cwd().openDir(arg_path, .{ .iterate = true });
-    defer dir.close();
-    var iter = dir.iterateAssumeFirstIteration();
-    try clear();
-    while (try iter.next()) |file| {
-        switch (file.kind) {
-            .file => {
-                const cmd = try std.fmt.allocPrint(gpa.allocator(), "{s} {s}", .{ FileIcon, file.name });
-                errdefer gpa.allocator().free(cmd);
-                try files.append(cmd);
-            },
-            .directory => {
-                const cmd = try std.fmt.allocPrint(gpa.allocator(), "{s} {s}", .{ DirIcon, file.name });
-                errdefer gpa.allocator().free(cmd);
-                try dirs.append(cmd);
-            },
-            else => continue,
-        }
-    }
-    try print_files(dirs, .on);
-    try print_files(files, .on);
-    //try stdout.print("\n", .{});
+    var term = Term{ .og_termios = undefined };
+    try term.enable_raw();
+    defer term.disable_raw() catch {};
+
+    try zfm.populate();
+
+    try term.clear();
+
+    try term.print_files(zfm.directories, .on);
+    try term.print_files(zfm.files, .on);
     try bw.flush(); // don't forget to flush!
 }
