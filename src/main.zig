@@ -17,6 +17,10 @@ const Key = enum {
     NOT_IMPLEMENTED,
 };
 
+const File = struct {
+    file: []const u8,
+};
+
 pub const Term = struct {
     handle: system.fd_t = std.io.getStdIn().handle,
     og_termios: std.os.termios,
@@ -48,6 +52,7 @@ pub const Term = struct {
             .on => {
                 for (files.items) |item| {
                     try self.stdout.print("{s}\n", .{item});
+                    //try self.stdout.print("\x1b[38;5;10;48;5;255m {s}\n", .{item});
                 }
             },
             .off => {
@@ -129,10 +134,19 @@ pub fn key_pressed() !Key {
     }
 }
 
+pub fn sort_list(list: *std.ArrayList([]const u8)) void {
+    std.mem.sort([]const u8, list.items, {}, struct {
+        fn f(_: void, a: []const u8, b: []const u8) bool {
+            return std.ascii.lessThanIgnoreCase(a, b);
+        }
+    }.f);
+}
+
 pub fn main() !void {
     var bw = std.io.bufferedWriter(stdout);
 
-    const arg_path: []const u8 = if (std.os.argv.len > 1) std.mem.span(@as([*:0]const u8, std.os.argv.ptr[1])) else ".";
+    const arg_path: []const u8 =
+        if (std.os.argv.len > 1) std.mem.span(@as([*:0]const u8, std.os.argv.ptr[1])) else ".";
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -145,10 +159,12 @@ pub fn main() !void {
     defer term.disable_raw() catch {};
 
     try zfm.populate();
-
+    sort_list(&zfm.files);
+    sort_list(&zfm.directories);
     try term.clear();
 
     try term.print_files(zfm.directories, .on);
     try term.print_files(zfm.files, .on);
+
     try bw.flush(); // don't forget to flush!
 }
