@@ -60,7 +60,7 @@ pub const Term = struct {
         try self.stdout.print("\x1b[2J", .{});
         try self.stdout.print("\x1b[H", .{});
     }
-    pub fn print_files(self: *Self, files: std.ArrayList([]const u8), mode: Hidden, y: *u16, x: u16) !void {
+    pub fn print_files(self: *Self, files: std.ArrayList([]const u8), mode: Hidden, y: *u8, x: u8) !void {
         switch (mode) {
             .on => {
                 for (files.items) |item| {
@@ -187,45 +187,27 @@ pub fn main() !void {
     sort_list(&zfm.directories);
     try term.clear();
 
-    var y: u16 = 0;
-    var max_y: u16 = 0;
+    var y: u8 = 0;
 
     try term.print_files(zfm.directories, .on, &y, 1);
     try term.print_files(zfm.files, .on, &y, 1);
 
-    const x = term.width / 2;
+    y = 0;
+    const x = term.height / 2;
+    _ = x;
+    try term.print_files(zfm.directories, .on, &y, 30);
+    try term.print_files(zfm.files, .on, &y, 30);
+
     try term.stdout.print("\x1b[1;1H\x1b[38;5;255;48;5;75m{s}", .{zfm.directories.items.ptr[0]});
-    for (zfm.directories.items.ptr[0].len..(x)) |len| {
+    for (zfm.directories.items.ptr[0].len..29) |len| {
         _ = len;
         try term.stdout.print(" ", .{});
     }
-    if (y > max_y) max_y = y;
     try term.stdout.print("\x1b[m", .{});
+    try term.stdout.print("\x1b[{};1H", .{y + 1});
 
-    const dir_next = zfm.directories.items.ptr[0][4..];
+    if (arg_path.ptr[arg_path.len - 1] != '/') {}
 
-    var tempal = std.ArrayList([]const u8).init(gpa.allocator());
-    //defer tempal.deinit();
-    try tempal.append(arg_path);
-    if (arg_path[arg_path.len - 1] != '/') try tempal.append("/");
-    try tempal.append(dir_next);
-
-    const nn = try tempal.toOwnedSlice();
-    defer gpa.allocator().free(nn);
-
-    const temp = try std.mem.join(gpa.allocator(), "", nn);
-    defer gpa.allocator().free(temp);
-
-    var zf_next = try Zfm.init(gpa.allocator(), temp);
-    defer zf_next.deinit();
-
-    try zf_next.populate();
-
-    y = 0;
-    try term.print_files(zf_next.directories, .on, &y, x);
-    try term.print_files(zf_next.files, .on, &y, x);
-
-    if (y > max_y) max_y = y;
-    try term.stdout.print("\x1b[{};1H", .{max_y + 1});
+    try term.stdout.print("w= {}\nh={}\n", .{ term.width, term.height });
     try bw.flush(); // don't forget to flush!
 }
