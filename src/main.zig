@@ -9,6 +9,7 @@ const Hidden = enum {
     on,
 };
 
+const mode: Hidden = .on;
 const Key = enum {
     UP,
     DOWN,
@@ -29,6 +30,8 @@ pub const Term = struct {
     stdout: @TypeOf(std.io.getStdOut().writer()) = std.io.getStdOut().writer(),
     width: u16 = undefined,
     height: u16 = undefined,
+    bg: u8 = 40,
+    fg: u8 = 34,
 
     const Self = @This();
 
@@ -46,7 +49,8 @@ pub const Term = struct {
     pub fn enable_raw(self: *Self) !void {
         self.og_termios = try std.os.tcgetattr(self.handle);
         var term = self.og_termios;
-        term.iflag &= ~(system.IXON);
+        term.iflag &= ~(system.IXON | system.ICRNL);
+        term.oflag &= ~(system.OPOST);
         term.lflag &= ~(system.ICANON | system.ECHO | system.ISIG);
 
         term.cc[system.V.MIN] = 1;
@@ -69,24 +73,42 @@ pub const Term = struct {
         try self.stdout.print("\x1b[2J", .{});
         try self.stdout.print("\x1b[H", .{});
     }
-    pub fn print_files(self: *Self, files: std.ArrayList([]const u8), mode: Hidden, c: *Cursor) !void {
-        switch (mode) {
+
+    pub fn print_files(self: *Self, zfm: *Zfm, modeHI: Hidden, c: *Cursor) !void {
+        switch (modeHI) {
             .on => {
-                for (files.items) |item| {
+                for (zfm.directories.items) |item| {
                     c.total_y += 1;
+                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, self.fg });
+                    try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
+                    //try self.stdout.print("\x1b[38;5;10;48;5;255m {s}\n", .{item});
+                }
+                for (zfm.files.items) |item| {
+                    c.total_y += 1;
+                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, 32 });
                     try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
                     //try self.stdout.print("\x1b[38;5;10;48;5;255m {s}\n", .{item});
                 }
             },
             .off => {
-                for (files.items) |item| {
-                    if (item[4] != '.') {
-                        try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
-                    }
+                for (zfm.directories.items[zfm.start_pd..]) |item| {
+                    c.total_y += 1;
+                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, self.fg });
+                    try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
+                }
+                for (zfm.files.items[zfm.start_pf..]) |item| {
+                    c.total_y += 1;
+                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, 32 });
+                    try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
                 }
             },
         }
     }
+    pub fn print_selected(self: *Self, cursor: *Cursor, chosen: []const u8) !void {
+        try self.stdout.print("\x1b[{d};{d}H", .{ cursor.*.y, cursor.*.x });
+        try self.stdout.print("\x1b[{};{}m\x1b[1;7m{s}", .{ self.bg, self.fg, chosen });
+    }
+
     pub fn disable_wrap(self: *Self) !void {
         try self.stdout.print("\x1b[?7l", .{});
     }
@@ -95,11 +117,15 @@ pub const Term = struct {
     }
 };
 
+var max_bp: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+
 pub const Zfm = struct {
     allocator: std.mem.Allocator,
     files: std.ArrayList([]const u8) = undefined,
     directories: std.ArrayList([]const u8) = undefined,
     path: []const u8,
+    start_pd: usize = 0,
+    start_pf: usize = 0,
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !Zfm {
@@ -107,7 +133,7 @@ pub const Zfm = struct {
             .allocator = allocator,
             .directories = std.ArrayList([]const u8).init(allocator),
             .files = std.ArrayList([]const u8).init(allocator),
-            .path = path,
+            .path = try std.fs.realpath(path, &max_bp),
         };
     }
 
@@ -127,7 +153,8 @@ pub const Zfm = struct {
         errdefer self.allocator.free(cmd);
         try file.append(cmd);
     }
-
+    //TODO:
+    //dodaj sym linkove
     pub fn populate(self: *Self) !void {
         var dir = try std.fs.cwd().openDir(self.path, .{ .iterate = true });
         defer dir.close();
@@ -140,6 +167,8 @@ pub const Zfm = struct {
                 .directory => {
                     try self.ff_helper(&self.directories, DirIcon, file.name);
                 },
+                //.sym_link => {
+                //}
                 else => continue,
             }
         }
@@ -151,12 +180,44 @@ pub const Zfm = struct {
         var zf_next = try Zfm.init(self.allocator, temp);
         defer zf_next.deinit();
         try zf_next.populate();
-        cursor.total_y = 0;
+        cursor.total_y = 1;
         cursor.x = term.width / 2;
-        try term.print_files(zf_next.directories, .on, cursor);
-        try term.print_files(zf_next.files, .on, cursor);
+        try term.print_files(&zf_next, mode, cursor);
+    }
+    pub fn find_start(self: *Self) void {
+        for (self.directories.items, 0..) |item, i| {
+            if (item[4] != '.') {
+                self.start_pd = i;
+                break;
+            }
+        }
+        for (self.files.items, 0..) |item, i| {
+            if (item[4] != '.') {
+                self.start_pf = i;
+                break;
+            }
+        }
     }
 };
+
+pub fn file_extension(s: []const u8) usize {
+    var index: usize = 0;
+    for (s, 0..) |_, i| {
+        const j = s.len - 1 - i;
+        if (s[j] == '.') {
+            index = j;
+        }
+    }
+    return (index);
+}
+
+pub fn supported(chosen: []const u8) bool {
+    const start = file_extension(chosen);
+    if (std.mem.eql(u8, chosen[start..], ".jpg")) {
+        return false;
+    }
+    return true;
+}
 
 pub fn key_pressed(c: *Cursor, quit: *bool) !void {
     const stdin = std.io.getStdIn().reader();
@@ -174,10 +235,10 @@ pub fn key_pressed(c: *Cursor, quit: *bool) !void {
     if (nread > 2 and buf[0] == '\x1b' and buf[1] == '[') {
         switch (buf[2]) {
             'A' => {
-                c.y = if (c.y > 1) c.y - 1 else @intCast(c.total_z);
+                c.y = if (c.y > 2) c.y - 1 else @intCast(c.total_z + 1);
             },
             'B' => {
-                c.y = if (c.y < c.total_z) c.y + 1 else 1;
+                c.y = if (c.y < c.total_z + 1) c.y + 1 else 2;
             },
             'C' => {
                 c.x = if (c.x > 1) c.x - 1 else 1;
@@ -237,56 +298,64 @@ pub fn main() !void {
     sort_list(&zfm.directories);
     try term.clear();
 
+    if (mode == .off) {
+        zfm.find_start();
+    }
     var cursor = Cursor{
-        .y = 1,
+        .y = 2,
         .x = 1,
-        .total_y = 0,
-        .total_z = zfm.directories.items.len + zfm.files.items.len,
+        .total_y = 1,
+        .total_z = (zfm.directories.items.len - zfm.start_pd) + (zfm.files.items.len - zfm.start_pf),
     };
     var max_y: u16 = 0;
 
     while (!quit) {
         max_y = 0;
         try term.clear();
-        cursor.total_y = 0;
-        try term.print_files(zfm.directories, .on, &cursor);
-        try term.print_files(zfm.files, .on, &cursor);
+        try term.stdout.print("{s}\r\n", .{zfm.path});
+        cursor.total_y = 1;
+        try term.print_files(&zfm, mode, &cursor);
 
         var chosen: []const u8 = undefined;
-        if (zfm.directories.items.len > cursor.y - 1) {
-            chosen = zfm.directories.items.ptr[cursor.y - 1];
+        if ((zfm.directories.items.len - zfm.start_pd) > cursor.y - 2) {
+            chosen = zfm.directories.items.ptr[cursor.y - 2 + zfm.start_pd];
             try zfm.next_directory(chosen[4..], &cursor, &term);
         } else {
-            chosen = zfm.files.items.ptr[cursor.y - zfm.directories.items.len - 1];
-            const fullpath = try concat(gpa.allocator(), zfm.path, chosen[4..]);
-            defer gpa.allocator().free(fullpath);
-            var fil = try std.fs.cwd().openFile(fullpath, .{});
-            defer fil.close();
+            const start_ptr: usize = ((cursor.y - (zfm.directories.items.len - zfm.start_pd)) + zfm.start_pf) - 2;
+            chosen = zfm.files.items.ptr[start_ptr];
+            if (supported(chosen)) {
+                const fullpath = try concat(gpa.allocator(), zfm.path, chosen[4..]);
+                //const ext = std.fs.path.extension(fullpath);
+                defer gpa.allocator().free(fullpath);
+                var fil = try std.fs.cwd().openFile(fullpath, .{});
+                defer fil.close();
 
-            var buf_reader = std.io.bufferedReader(fil.reader());
-            const reader = buf_reader.reader();
+                var buf_reader = std.io.bufferedReader(fil.reader());
+                const reader = buf_reader.reader();
 
-            var line = std.ArrayList(u8).init(gpa.allocator());
-            defer line.deinit();
+                var line = std.ArrayList(u8).init(gpa.allocator());
+                defer line.deinit();
 
-            cursor.x = term.width / 2;
-            cursor.total_y = 1;
+                cursor.x = term.width / 2;
+                cursor.total_y = 2;
 
-            const writer = line.writer();
-            while (reader.streamUntilDelimiter(writer, '\n', null)) : (cursor.total_y += 1) {
-                defer line.clearRetainingCapacity();
-                if (cursor.total_y > term.height - 1) break;
+                const writer = line.writer();
+                while (reader.streamUntilDelimiter(writer, '\n', null)) : (cursor.total_y += 1) {
+                    defer line.clearRetainingCapacity();
+                    if (cursor.total_y > term.height - 1) break;
+                    const k = if (line.items.len > term.width - cursor.x) term.width - cursor.x else line.items.len;
 
-                try term.stdout.print("\x1b[{d};{d}H{s}\n", .{ cursor.total_y, cursor.x, line.items });
-            } else |err| switch (err) {
-                error.EndOfStream => {},
-                else => return err,
+                    try term.stdout.print("\x1b[{d};{d}H", .{ cursor.total_y, cursor.x });
+                    try term.stdout.print("{s}\r\n", .{line.items.ptr[0..k]});
+                } else |err| switch (err) {
+                    error.EndOfStream => {},
+                    else => return err,
+                }
             }
         }
 
         cursor.x = 1;
-        try term.stdout.print("\x1b[{d};{d}H", .{ cursor.y, cursor.x });
-        try term.stdout.print("\x1b[38;5;255;48;5;75m{s}", .{chosen});
+        try term.print_selected(&cursor, chosen);
         for (chosen.len..(term.width / 2)) |len| {
             _ = len;
             try term.stdout.print(" ", .{});
