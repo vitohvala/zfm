@@ -3,6 +3,8 @@ const system = std.os.system;
 const stdout = std.io.getStdOut().writer();
 const FileIcon = "";
 const DirIcon = "";
+const FG_FILES = 32;
+const FG_DIR = 34;
 
 const Hidden = enum {
     off,
@@ -31,7 +33,7 @@ pub const Term = struct {
     width: u16 = undefined,
     height: u16 = undefined,
     bg: u8 = 40,
-    fg: u8 = 34,
+    fg: u8 = FG_DIR,
 
     const Self = @This();
 
@@ -85,7 +87,7 @@ pub const Term = struct {
                 }
                 for (zfm.files.items) |item| {
                     c.total_y += 1;
-                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, 32 });
+                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, FG_FILES });
                     try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
                     //try self.stdout.print("\x1b[38;5;10;48;5;255m {s}\n", .{item});
                 }
@@ -98,7 +100,7 @@ pub const Term = struct {
                 }
                 for (zfm.files.items[zfm.start_pf..]) |item| {
                     c.total_y += 1;
-                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, 32 });
+                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, FG_FILES });
                     try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
                 }
             },
@@ -111,6 +113,12 @@ pub const Term = struct {
 
     pub fn disable_wrap(self: *Self) !void {
         try self.stdout.print("\x1b[?7l", .{});
+    }
+    pub fn smcup(self: *Self) !void {
+        try self.stdout.print("\x1b[?1049h", .{});
+    }
+    pub fn rmcup(self: *Self) !void {
+        try self.stdout.print("\x1b[?1049l", .{});
     }
     pub fn enable_wrap(self: *Self) !void {
         try self.stdout.print("\x1b[?7h", .{});
@@ -288,6 +296,9 @@ pub fn main() !void {
     try term.enable_raw();
     defer term.disable_raw() catch {};
 
+    try term.smcup();
+    defer term.rmcup() catch {};
+
     try term.disable_wrap();
     defer term.enable_wrap() catch {};
     try term.hide_cursor();
@@ -319,10 +330,12 @@ pub fn main() !void {
         var chosen: []const u8 = undefined;
         if ((zfm.directories.items.len - zfm.start_pd) > cursor.y - 2) {
             chosen = zfm.directories.items.ptr[cursor.y - 2 + zfm.start_pd];
+            term.fg = FG_DIR;
             try zfm.next_directory(chosen[4..], &cursor, &term);
         } else {
             const start_ptr: usize = ((cursor.y - (zfm.directories.items.len - zfm.start_pd)) + zfm.start_pf) - 2;
             chosen = zfm.files.items.ptr[start_ptr];
+            term.fg = FG_FILES;
             if (supported(chosen)) {
                 const fullpath = try concat(gpa.allocator(), zfm.path, chosen[4..]);
                 //const ext = std.fs.path.extension(fullpath);
@@ -345,6 +358,7 @@ pub fn main() !void {
                     if (cursor.total_y > term.height - 1) break;
                     const k = if (line.items.len > term.width - cursor.x) term.width - cursor.x else line.items.len;
 
+                    try term.stdout.print("\x1b[m", .{});
                     try term.stdout.print("\x1b[{d};{d}H", .{ cursor.total_y, cursor.x });
                     try term.stdout.print("{s}\r\n", .{line.items.ptr[0..k]});
                 } else |err| switch (err) {
@@ -360,6 +374,7 @@ pub fn main() !void {
             _ = len;
             try term.stdout.print(" ", .{});
         }
+        term.fg = FG_DIR;
         if (cursor.total_y > max_y) max_y = cursor.total_y;
         try term.stdout.print("\x1b[m", .{});
 
