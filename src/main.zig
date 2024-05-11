@@ -1,17 +1,11 @@
 const std = @import("std");
 const system = std.os.system;
-const stdout = std.io.getStdOut().writer();
 const FileIcon = "";
 const DirIcon = "";
 const FG_FILES = 32;
 const FG_DIR = 34;
+var mode: bool = true;
 
-const Hidden = enum {
-    off,
-    on,
-};
-
-const mode: Hidden = .on;
 const Key = enum {
     UP,
     DOWN,
@@ -76,38 +70,20 @@ pub const Term = struct {
         try self.stdout.print("\x1b[H", .{});
     }
 
-    pub fn print_files(self: *Self, zfm: *Zfm, modeHI: Hidden, c: *Cursor) !void {
-        switch (modeHI) {
-            .on => {
-                for (zfm.directories.items) |item| {
-                    c.total_y += 1;
-                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, self.fg });
-                    try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
-                    //try self.stdout.print("\x1b[38;5;10;48;5;255m {s}\n", .{item});
-                }
-                for (zfm.files.items) |item| {
-                    c.total_y += 1;
-                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, FG_FILES });
-                    try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
-                    //try self.stdout.print("\x1b[38;5;10;48;5;255m {s}\n", .{item});
-                }
-            },
-            .off => {
-                for (zfm.directories.items[zfm.start_pd..]) |item| {
-                    c.total_y += 1;
-                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, self.fg });
-                    try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
-                }
-                for (zfm.files.items[zfm.start_pf..]) |item| {
-                    c.total_y += 1;
-                    try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, FG_FILES });
-                    try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
-                }
-            },
+    pub fn print_files(self: *Self, zfm: *Zfm, c: *Cursor) !void {
+        for (zfm.directories.items[zfm.start_pd..]) |item| {
+            c.total_y += 1;
+            try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, self.fg });
+            try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
+        }
+        for (zfm.files.items[zfm.start_pf..]) |item| {
+            c.total_y += 1;
+            try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, FG_FILES });
+            try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
         }
     }
     pub fn print_selected(self: *Self, cursor: *Cursor, chosen: []const u8) !void {
-        try self.stdout.print("\x1b[{d};{d}H", .{ cursor.*.y, cursor.*.x });
+        try self.stdout.print("\x1b[{d};{d}H", .{ cursor.y, cursor.x });
         try self.stdout.print("\x1b[{};{}m\x1b[1;7m{s}", .{ self.bg, self.fg, chosen });
     }
 
@@ -181,16 +157,16 @@ pub const Zfm = struct {
             }
         }
     }
-    pub fn next_directory(self: *Self, chosen: []const u8, cursor: *Cursor, term: *Term) !void {
+    pub fn next_directory(self: *Self, chosen: []const u8, cursor: *Cursor, term: *Term) !Zfm {
         const temp = try concat(self.allocator, self.path, chosen);
         defer self.allocator.free(temp);
 
         var zf_next = try Zfm.init(self.allocator, temp);
-        defer zf_next.deinit();
         try zf_next.populate();
         cursor.total_y = 1;
         cursor.x = term.width / 2;
-        try term.print_files(&zf_next, mode, cursor);
+        //try term.print_files(&zf_next, mode, cursor);
+        return zf_next;
     }
     pub fn find_start(self: *Self) void {
         for (self.directories.items, 0..) |item, i| {
@@ -205,29 +181,24 @@ pub const Zfm = struct {
                 break;
             }
         }
+        if (mode) {
+            self.start_pf = 0;
+            self.start_pd = 0;
+        }
     }
 };
 
-pub fn file_extension(s: []const u8) usize {
-    var index: usize = 0;
-    for (s, 0..) |_, i| {
-        const j = s.len - 1 - i;
-        if (s[j] == '.') {
-            index = j;
-        }
-    }
-    return (index);
-}
-
 pub fn supported(chosen: []const u8) bool {
-    const start = file_extension(chosen);
-    if (std.mem.eql(u8, chosen[start..], ".jpg")) {
-        return false;
+    const not_supported: [4][]const u8 = .{ ".jpg", ".png", ".pdf", ".jpeg" };
+    for (not_supported) |not| {
+        if (std.mem.endsWith(u8, chosen, not)) {
+            return false;
+        }
     }
     return true;
 }
 
-pub fn key_pressed(c: *Cursor, quit: *bool) !void {
+pub fn key_pressed(c: *Cursor, quit: *bool, zfm: *Zfm) !void {
     const stdin = std.io.getStdIn().reader();
     var buf: [4]u8 = undefined;
     const nread = try stdin.read(&buf);
@@ -236,6 +207,12 @@ pub fn key_pressed(c: *Cursor, quit: *bool) !void {
     if (nread == 1) {
         switch (buf[0]) {
             'q', 'q' & 0x1f, 0x1b => quit.* = true,
+            'h' & 0x1f => {
+                mode = !mode;
+                zfm.find_start();
+                c.y = 2;
+                c.total_z = (zfm.directories.items.len - zfm.start_pd) + (zfm.files.items.len - zfm.start_pf);
+            },
             else => quit.* = false,
         }
     }
@@ -279,7 +256,6 @@ pub fn concat(alloc: std.mem.Allocator, a: []const u8, b: []const u8) ![]const u
 }
 
 pub fn main() !void {
-    var bw = std.io.bufferedWriter(stdout);
     var quit = false;
 
     const arg_path: []const u8 =
@@ -289,6 +265,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
 
     var zfm = try Zfm.init(gpa.allocator(), arg_path);
+    var zfm2: Zfm = undefined;
     defer zfm.deinit();
 
     var term = Term{ .og_termios = undefined };
@@ -309,9 +286,6 @@ pub fn main() !void {
     sort_list(&zfm.directories);
     try term.clear();
 
-    if (mode == .off) {
-        zfm.find_start();
-    }
     var cursor = Cursor{
         .y = 2,
         .x = 1,
@@ -322,16 +296,23 @@ pub fn main() !void {
 
     while (!quit) {
         max_y = 0;
+
         try term.clear();
         try term.stdout.print("{s}\r\n", .{zfm.path});
         cursor.total_y = 1;
-        try term.print_files(&zfm, mode, &cursor);
+        try term.print_files(&zfm, &cursor);
 
         var chosen: []const u8 = undefined;
         if ((zfm.directories.items.len - zfm.start_pd) > cursor.y - 2) {
             chosen = zfm.directories.items.ptr[cursor.y - 2 + zfm.start_pd];
             term.fg = FG_DIR;
-            try zfm.next_directory(chosen[4..], &cursor, &term);
+            zfm2 = try zfm.next_directory(chosen[4..], &cursor, &term);
+            defer zfm2.deinit();
+
+            sort_list(&zfm2.files);
+            sort_list(&zfm2.directories);
+            zfm2.find_start();
+            try term.print_files(&zfm2, &cursor);
         } else {
             const start_ptr: usize = ((cursor.y - (zfm.directories.items.len - zfm.start_pd)) + zfm.start_pf) - 2;
             chosen = zfm.files.items.ptr[start_ptr];
@@ -379,7 +360,6 @@ pub fn main() !void {
         try term.stdout.print("\x1b[m", .{});
 
         try term.stdout.print("\x1b[{d};1H", .{max_y + 1});
-        try key_pressed(&cursor, &quit);
+        try key_pressed(&cursor, &quit, &zfm);
     }
-    try bw.flush(); // don't forget to flush!
 }
