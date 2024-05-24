@@ -31,15 +31,21 @@ pub const Term = struct {
 
     const Self = @This();
 
-    pub fn term_size(self: *Self) !void {
+    pub fn term_size(self: *Self) !bool {
         var ws: std.os.system.winsize = undefined;
 
         const err = std.os.linux.ioctl(self.handle, std.os.system.T.IOCGWINSZ, @intFromPtr(&ws));
         if (std.os.errno(err) != .SUCCESS) {
             return error.IoctlError;
         }
+
+        if (ws.ws_col == self.width) return false;
+        if (ws.ws_row == self.height) return false;
+
         self.width = ws.ws_col;
         self.height = ws.ws_row;
+
+        return true;
     }
 
     pub fn enable_raw(self: *Self) !void {
@@ -71,20 +77,24 @@ pub const Term = struct {
     }
 
     pub fn print_files(self: *Self, zfm: *Zfm, c: *Cursor) !void {
-        for (zfm.directories.items[zfm.start_pd..]) |item| {
+        var k: usize = 0;
+        for (zfm.directories.items[zfm.start_pd..zfm.end_pd]) |item| {
             c.total_y += 1;
+            k = if (item.len > self.width / 2) self.width / 2 else item.len;
             try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, self.fg });
-            try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
+            try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item[0..k] });
         }
-        for (zfm.files.items[zfm.start_pf..]) |item| {
+        for (zfm.files.items[zfm.start_pf..zfm.end_pf]) |item| {
             c.total_y += 1;
+            k = if (item.len > self.width / 2) self.width / 2 else item.len;
             try self.stdout.print("\x1b[1;{d};{d}m", .{ self.bg, FG_FILES });
-            try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item });
+            try self.stdout.print("\x1b[{d};{d}H{s}", .{ c.total_y, c.x, item[0..k] });
         }
     }
     pub fn print_selected(self: *Self, cursor: *Cursor, chosen: []const u8) !void {
+        const k = if (chosen.len > (self.width / 2)) (self.width / 2) else chosen.len;
         try self.stdout.print("\x1b[{d};{d}H", .{ cursor.y, cursor.x });
-        try self.stdout.print("\x1b[{};{}m\x1b[1;7m{s}", .{ self.bg, self.fg, chosen });
+        try self.stdout.print("\x1b[{};{}m\x1b[1;7m{s}", .{ self.bg, self.fg, chosen[0..k] });
     }
 
     pub fn disable_wrap(self: *Self) !void {
@@ -110,6 +120,10 @@ pub const Zfm = struct {
     path: []const u8,
     start_pd: usize = 0,
     start_pf: usize = 0,
+    tzero_f: usize = 0,
+    tzero_d: usize = 0,
+    end_pd: usize = 0,
+    end_pf: usize = 0,
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !Zfm {
@@ -172,24 +186,34 @@ pub const Zfm = struct {
         for (self.directories.items, 0..) |item, i| {
             if (item[4] != '.') {
                 self.start_pd = i;
+                self.tzero_d = i;
                 break;
             }
         }
         for (self.files.items, 0..) |item, i| {
             if (item[4] != '.') {
                 self.start_pf = i;
+                self.tzero_f = i;
                 break;
             }
         }
+
         if (mode) {
             self.start_pf = 0;
             self.start_pd = 0;
+            self.tzero_f = 0;
+            self.tzero_d = 0;
         }
+    }
+    pub fn get_endp(self: *Self, term: *Term) void {
+        self.end_pd = if (self.directories.items.len > term.height) term.height - 1 + self.start_pd else self.directories.items.len;
+        const tmp_h = term.height - (self.end_pd - self.start_pd) - 1;
+        self.end_pf = if (self.files.items.len > tmp_h) tmp_h + self.start_pf else self.files.items.len;
     }
 };
 
 pub fn supported(chosen: []const u8) bool {
-    const not_supported: [4][]const u8 = .{ ".jpg", ".png", ".pdf", ".jpeg" };
+    const not_supported: [19][]const u8 = .{ ".jpg", ".png", ".pdf", ".jpeg", "zip", "iso", "svg", "webp", "doc", "docx", "pdf", "torrent", "PDF", "rar", "7z", "pptx", "ISO", "mkv", "parts" };
     for (not_supported) |not| {
         if (std.mem.endsWith(u8, chosen, not)) {
             return false;
@@ -198,7 +222,7 @@ pub fn supported(chosen: []const u8) bool {
     return true;
 }
 
-pub fn key_pressed(c: *Cursor, quit: *bool, zfm: *Zfm) !void {
+pub fn key_pressed(c: *Cursor, quit: *bool, zfm: *Zfm, term: *Term) !void {
     const stdin = std.io.getStdIn().reader();
     var buf: [4]u8 = undefined;
     const nread = try stdin.read(&buf);
@@ -207,9 +231,10 @@ pub fn key_pressed(c: *Cursor, quit: *bool, zfm: *Zfm) !void {
     if (nread == 1) {
         switch (buf[0]) {
             'q', 'q' & 0x1f, 0x1b => quit.* = true,
-            'h' & 0x1f => {
+            ('h' | 'H') & 0x1f => {
                 mode = !mode;
                 zfm.find_start();
+                zfm.get_endp(term);
                 c.y = 2;
                 c.total_z = (zfm.directories.items.len - zfm.start_pd) + (zfm.files.items.len - zfm.start_pf);
             },
@@ -220,10 +245,22 @@ pub fn key_pressed(c: *Cursor, quit: *bool, zfm: *Zfm) !void {
     if (nread > 2 and buf[0] == '\x1b' and buf[1] == '[') {
         switch (buf[2]) {
             'A' => {
-                c.y = if (c.y > 2) c.y - 1 else @intCast(c.total_z + 1);
+                if (c.y > 2) {
+                    c.y -= 1;
+                } else if (c.y <= 2 and (zfm.start_pd > zfm.tzero_d or zfm.start_pf > zfm.tzero_f)) {
+                    if (zfm.start_pf > zfm.tzero_f) zfm.start_pf -= 1 else zfm.start_pd -= 1;
+                    if (zfm.end_pf > zfm.start_pf) zfm.end_pf -= 1 else zfm.end_pd -= 1;
+                    c.y = 2;
+                }
             },
             'B' => {
-                c.y = if (c.y < c.total_z + 1) c.y + 1 else 2;
+                if (c.y < term.height and c.y < c.total_z + 1)
+                    c.y += 1
+                else if (c.y >= term.height and (zfm.end_pf < zfm.files.items.len or zfm.end_pd < zfm.directories.items.len)) {
+                    c.y = term.height;
+                    if (zfm.start_pd < zfm.directories.items.len) zfm.start_pd += 1 else zfm.start_pf += 1;
+                    if (zfm.end_pd < zfm.directories.items.len) zfm.end_pd += 1 else zfm.end_pf += 1;
+                }
             },
             'C' => {
                 c.x = if (c.x > 1) c.x - 1 else 1;
@@ -269,7 +306,7 @@ pub fn main() !void {
     defer zfm.deinit();
 
     var term = Term{ .og_termios = undefined };
-    try term.term_size();
+    _ = try term.term_size();
     try term.enable_raw();
     defer term.disable_raw() catch {};
 
@@ -292,14 +329,15 @@ pub fn main() !void {
         .total_y = 1,
         .total_z = (zfm.directories.items.len - zfm.start_pd) + (zfm.files.items.len - zfm.start_pf),
     };
-    var max_y: u16 = 0;
 
+    zfm.find_start();
+    zfm.get_endp(&term);
     while (!quit) {
-        max_y = 0;
-
         try term.clear();
-        try term.stdout.print("{s}\r\n", .{zfm.path});
         cursor.total_y = 1;
+        try term.stdout.print("{s} ed{d} ef{d} sd{d} sf{d}\r\n", .{ zfm.path, zfm.end_pd, zfm.end_pf, zfm.start_pd, zfm.start_pf });
+        if (try term.term_size()) zfm.get_endp(&term);
+
         try term.print_files(&zfm, &cursor);
 
         var chosen: []const u8 = undefined;
@@ -312,6 +350,7 @@ pub fn main() !void {
             sort_list(&zfm2.files);
             sort_list(&zfm2.directories);
             zfm2.find_start();
+            zfm2.get_endp(&term);
             try term.print_files(&zfm2, &cursor);
         } else {
             const start_ptr: usize = ((cursor.y - (zfm.directories.items.len - zfm.start_pd)) + zfm.start_pf) - 2;
@@ -351,15 +390,13 @@ pub fn main() !void {
 
         cursor.x = 1;
         try term.print_selected(&cursor, chosen);
-        for (chosen.len..(term.width / 2)) |len| {
-            _ = len;
+        var tmp: usize = chosen.len;
+        while (tmp < (term.width / 2)) : (tmp += 1) {
             try term.stdout.print(" ", .{});
         }
         term.fg = FG_DIR;
-        if (cursor.total_y > max_y) max_y = cursor.total_y;
         try term.stdout.print("\x1b[m", .{});
 
-        try term.stdout.print("\x1b[{d};1H", .{max_y + 1});
-        try key_pressed(&cursor, &quit, &zfm);
+        try key_pressed(&cursor, &quit, &zfm, &term);
     }
 }
