@@ -30,7 +30,7 @@ const FileItems = struct {
 pub fn format_bytes(bytes: u64, alloc: std.mem.Allocator) ![]u8 {
     const symbols = " KMG";
     const size_float = @as(f64, @floatFromInt(bytes));
-    const exp: u64 = @as(u64, @intFromFloat(@min(@log(size_float) / @log(1024.00), 4)));
+    const exp: u64 = @as(u64, @intFromFloat(@min(@log(size_float) / @log(1024.00), symbols.len - 1)));
     const fm = size_float / std.math.pow(f64, 1024.00, @as(f64, @floatFromInt(exp)));
 
     const ret = try std.fmt.allocPrint(alloc, "{d:.1}{c}", .{ fm, symbols[exp] });
