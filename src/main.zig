@@ -4,7 +4,7 @@ const FileIcon = "";
 const DirIcon = "";
 const FG_FILES = 32;
 const FG_DIR = 34;
-var hidden: bool = true;
+var hidden: bool = false;
 
 const Key = enum {
     UP,
@@ -22,13 +22,14 @@ const Cursor = struct {
 };
 
 const FileItems = struct {
-    icon: []u8,
+    icon: []const u8,
     name: []const u8,
     kind: std.fs.File.Kind,
 };
 
 pub fn format_bytes(bytes: u64, alloc: std.mem.Allocator) ![]u8 {
     const symbols = " KMG";
+    if (bytes == 0) return std.fmt.allocPrint(alloc, "0 ", .{});
     const size_float = @as(f64, @floatFromInt(bytes));
     const exp: u64 = @as(u64, @intFromFloat(@min(@log(size_float) / @log(1024.00), symbols.len - 1)));
     const fm = size_float / std.math.pow(f64, 1024.00, @as(f64, @floatFromInt(exp)));
@@ -194,11 +195,6 @@ pub const Zfm = struct {
         self.entries.deinit();
     }
 
-    pub fn ff_helper(self: *Self, name: []const u8) ![]u8 {
-        const cmd = try std.fmt.allocPrint(self.allocator, "{s}", .{name});
-        errdefer self.allocator.free(cmd);
-        return cmd;
-    }
     //TODO:
     //dodaj sym linkove
     pub fn populate(self: *Self) !void {
@@ -206,25 +202,26 @@ pub const Zfm = struct {
         defer dir.close();
         var iter = dir.iterate();
         while (try iter.next()) |file| {
-            const name = try self.ff_helper(file.name);
+            var icon: []const u8 = undefined;
             switch (file.kind) {
                 .file => {
-                    const icon = try self.ff_helper(FileIcon);
-                    try self.entries.append(.{ .icon = icon, .name = name, .kind = file.kind });
+                    icon = try self.allocator.dupe(u8, FileIcon);
+                    try self.entries.append(.{ .name = try self.allocator.dupe(u8, file.name), .icon = icon, .kind = file.kind });
                 },
                 .directory => {
-                    const icon = try self.ff_helper(DirIcon);
-                    try self.entries.append(.{ .icon = icon, .name = name, .kind = file.kind });
+                    icon = try self.allocator.dupe(u8, DirIcon);
+                    try self.entries.append(.{ .name = try self.allocator.dupe(u8, file.name), .icon = icon, .kind = file.kind });
                 },
                 //.sym_link => {
                 //}
                 else => continue,
             }
         }
+        sort_df(&self.entries);
     }
 
     pub fn next_directory(self: *Self, chosen: []const u8, cursor: *Cursor, term: *Term) !Zfm {
-        const temp = try concat(self.allocator, self.path, chosen);
+        const temp = try path_concat(self.allocator, self.path, chosen);
         defer self.allocator.free(temp);
 
         var zf_next = try Zfm.create(self.allocator, temp);
@@ -291,7 +288,7 @@ pub fn handle_keypress(key: Key, zfm: *Zfm, c: *Cursor, t: *Term, chosen: []cons
         },
         .RIGHT => {
             if (zfm.entries.items[c.y + zfm.start_e].kind != .file and !zfm.next_empty) {
-                const t_path = try concat(zfm.allocator, zfm.path, chosen);
+                const t_path = try path_concat(zfm.allocator, zfm.path, chosen);
                 defer zfm.allocator.free(t_path);
                 try zfm.init_new(t_path);
                 c.y = 2;
@@ -306,7 +303,7 @@ pub fn handle_keypress(key: Key, zfm: *Zfm, c: *Cursor, t: *Term, chosen: []cons
             }
         },
         .DOWN => {
-            if (c.y < t.height and c.y < zfm.entries.items.len)
+            if (c.y < t.height and c.y <= zfm.entries.items.len)
                 c.y += 1
             else if (c.y >= t.height and zfm.start_e < zfm.entries.items.len) {
                 zfm.start_e += 1;
@@ -323,23 +320,27 @@ pub fn handle_keypress(key: Key, zfm: *Zfm, c: *Cursor, t: *Term, chosen: []cons
     return false;
 }
 
-pub fn sort_list(list: *std.ArrayList([]const u8)) void {
-    std.mem.sort(list, list.items, {}, struct {
-        fn f(_: void, a: []u8, b: []u8) bool {
-            return std.ascii.lessThanIgnoreCase(a, b);
+pub fn sort_list(list: *std.ArrayList(FileItems)) void {
+    std.mem.sort(FileItems, list.items, {}, struct {
+        fn f(_: void, a: FileItems, b: FileItems) bool {
+            return std.ascii.lessThanIgnoreCase(a.name, b.name);
         }
     }.f);
 }
 
-pub fn concat(alloc: std.mem.Allocator, a: []const u8, b: []const u8) ![]const u8 {
-    var al = std.ArrayList([]const u8).init(alloc);
-    try al.append(a);
-    if (a[a.len - 1] != '/') try al.append("/");
-    try al.append(b);
-    const help = try al.toOwnedSlice();
-    const fullpath = try std.mem.join(alloc, "", help);
-    alloc.free(help);
-    return fullpath;
+pub fn sort_df(list: *std.ArrayList(FileItems)) void {
+    std.mem.sort(FileItems, list.items, {}, struct {
+        fn f(_: void, a: FileItems, b: FileItems) bool {
+            return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+        }
+    }.f);
+}
+
+pub fn path_concat(alloc: std.mem.Allocator, a: []const u8, b: []const u8) ![]const u8 {
+    if (a[a.len - 1] != std.fs.path.sep) {
+        return try std.mem.concat(alloc, u8, &[_][]const u8{ a, std.fs.path.sep_str, b });
+    }
+    return std.mem.concat(alloc, u8, &[_][]const u8{ a, b });
 }
 
 pub fn main() !void {
@@ -379,7 +380,7 @@ pub fn main() !void {
             if (zfm.next_directory(chosen, &cursor, &term)) |zf_next| {
                 var zfm2 = zf_next;
                 defer zfm2.deinit();
-                const fullpath = try concat(gpa.allocator(), zfm.path, chosen);
+                const fullpath = try path_concat(gpa.allocator(), zfm.path, chosen);
                 defer gpa.allocator().free(fullpath);
                 var dirsel = try std.fs.cwd().openDir(fullpath, .{});
                 defer dirsel.close();
@@ -398,7 +399,7 @@ pub fn main() !void {
         } else {
             term.fg = FG_FILES;
             if (supported(chosen)) {
-                const fullpath = try concat(gpa.allocator(), zfm.path, chosen);
+                const fullpath = try path_concat(gpa.allocator(), zfm.path, chosen);
                 //const ext = std.fs.path.extension(fullpath);
                 defer gpa.allocator().free(fullpath);
                 var fil = try std.fs.cwd().openFile(fullpath, .{});
@@ -432,10 +433,13 @@ pub fn main() !void {
             }
         }
 
+        const selected = try std.mem.concat(gpa.allocator(), u8, &[_][]const u8{ zfm.entries.items[cursor.y - 2 + zfm.start_e].icon, " ", chosen });
+
         cursor.x = 1;
         const fmt_bytes = try format_bytes(sel_size, gpa.allocator());
-        defer gpa.allocator().free(fmt_bytes);
-        try term.print_selected(&cursor, chosen, fmt_bytes);
+        try term.print_selected(&cursor, selected, fmt_bytes);
+        gpa.allocator().free(selected);
+        gpa.allocator().free(fmt_bytes);
 
         term.fg = FG_DIR;
         try term.stdout.print("\x1b[m", .{});
@@ -443,5 +447,6 @@ pub fn main() !void {
         const key: Key = try key_pressed();
         quit = try handle_keypress(key, &zfm, &cursor, &term, chosen);
         zfm.next_empty = false;
+        std.time.sleep(1000000);
     }
 }
